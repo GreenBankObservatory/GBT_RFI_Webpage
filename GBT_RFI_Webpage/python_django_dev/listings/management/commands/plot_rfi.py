@@ -1,3 +1,4 @@
+from pathlib import Path
 import logging
 
 from django.core.management.base import BaseCommand
@@ -28,6 +29,11 @@ class Command(BaseCommand):
             "--show",
             action="store_true",
             help="Show interactive plot",
+        )
+        parser.add_argument(
+            "--output",
+            type=Path,
+            help="Directory in which to save output files",
         )
 
     def handle(self, *args, **options):
@@ -69,13 +75,17 @@ class Command(BaseCommand):
         data = pd.DataFrame(MasterRfiCatalog.objects.filter(mjd=mjd).values())
 
         # Write CSV
-        csv_filename = "rfi_data_{}.csv".format(dt.strftime("%Y-%m-%d_%H-%M-%S"))
+        csv_filename = options["output"] / "rfi_data_{}.csv".format(
+            dt.strftime("%Y-%m-%d_%H-%M-%S")
+        )
         print("Wrote {}".format(csv_filename))
         # Write CSV file; don't include index column
         data.to_csv(csv_filename, index=False)
 
         # Convert from list of (freq, intensity) to two "lists": freqs and intensities
-        plot_filename = "rfi_data_{}_plot.png".format(dt.strftime("%Y-%m-%d_%H-%M-%S"))
+        plot_filename = options["output"] / "rfi_data_{}_plot.png".format(
+            dt.strftime("%Y-%m-%d_%H-%M-%S")
+        )
         plt.suptitle("RFI Data Plot")
         plt.title(dt)
         plt.xlabel("Frequency (MHZ)")
