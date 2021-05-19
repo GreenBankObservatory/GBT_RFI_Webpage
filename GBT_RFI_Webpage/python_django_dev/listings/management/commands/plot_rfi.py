@@ -2,6 +2,7 @@ from pathlib import Path
 import logging
 
 from django.core.management.base import BaseCommand
+from django.db.models import Max
 
 import pandas as pd
 import dateutil.parser as dp
@@ -19,11 +20,47 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "date",
-            nargs="?",
+            "-d",
+            "--date",
             type=dp.parse,
-            help="Provide that date on which the RFI data was taken. "
-            "Any reasonable format should work",
+            help="Provide a date close to when the RFI data was taken. "
+            "Any reasonable format should work, e.g. 'YYYY/MM/DD HH:mm:ss'",
+        )
+        parser.add_argument(
+            "-s",
+            "--start",
+            type=dp.parse,
+            help="Provide a start date"
+            "Any reasonable format should work, e.g. 'YYYY/MM/DD HH:mm:ss'",
+        )
+        parser.add_argument(
+            "-e",
+            "--end",
+            type=dp.parse,
+            help="Provide an end date"
+            "Any reasonable format should work, e.g. 'YYYY/MM/DD HH:mm:ss'",
+        )
+        parser.add_argument(
+            "-r",
+            "--receivers",
+            choices=sorted(
+                MasterRfiCatalog.objects.values_list("frontend", flat=True).distinct()
+            ),
+            nargs="+",
+            help="Select data only from given receiver(s)",
+        )
+        parser.add_argument(
+            "-F",
+            "--frequency",
+            type=float,
+            help="Middle frequency",
+        )
+        parser.add_argument(
+            "-b",
+            "--buffer",
+            type=float,
+            help="Frequency filter window size",
+            default=500.0,
         )
         parser.add_argument(
             "--show",
@@ -33,23 +70,37 @@ class Command(BaseCommand):
         parser.add_argument(
             "--output",
             type=Path,
+            default=Path("."),
             help="Directory in which to save output files",
         )
 
     def handle(self, *args, **options):
+        rows = MasterRfiCatalog.objects.all()
+        if options["receivers"]:
+            print("Selecting scans from receivers: {}".format(options["receivers"]))
+            rows = rows.filter(frontend__in=options["receivers"])
+
+        if options["frequency"]:
+            lower_bound = options["frequency"] - options["buffer"] / 2
+            upper_bound = options["frequency"] + options["buffer"] / 2
+            print(
+                "Selecting scans between frequencies {} MHz - {} MHz".format(
+                    lower_bound, upper_bound
+                )
+            )
+            rows = rows.filter(
+                frequency_mhz__gte=lower_bound, frequency_mhz__lte=upper_bound
+            )
+
         if options["date"]:
             date_mjd = datetime_to_mjd(options["date"])
             # Get the nearest MJD (without scanning the whole table)
             mjd = max(
                 abs(mjd_)
                 for mjd_ in (
-                    MasterRfiCatalog.objects.filter(mjd__gte=date_mjd)
+                    rows.filter(mjd__gte=date_mjd)
                     .order_by("mjd")[:1]
-                    .union(
-                        MasterRfiCatalog.objects.filter(mjd__lt=date_mjd).order_by(
-                            "-mjd"
-                        )[:1]
-                    )
+                    .union(rows.filter(mjd__lt=date_mjd).order_by("-mjd")[:1])
                     .values_list("mjd", flat=True)
                 )
             )
@@ -58,36 +109,69 @@ class Command(BaseCommand):
                     mjd, mjd_to_datetime(mjd), date_mjd, options["date"]
                 )
             )
+            rows = rows.filter(mjd=mjd)
+            start_mjd = mjd
+            end_mjd = mjd
+        elif options["start"] or options["end"]:
+            start_mjd = datetime_to_mjd(options["start"])
+            end_mjd = datetime_to_mjd(options["end"])
+            if options["start"]:
+                print("Selecting scans starting after {}".format(start_mjd))
+                rows = rows.filter(mjd__gte=start_mjd)
+            if options["end"]:
+                print("Selecting scans starting before {}".format(end_mjd))
+                rows = rows.filter(mjd__lte=end_mjd)
         else:
-            # Get the most recent mjd value from the DB
-            # (Order by mjd column, descending (i.e. newest rows first). Select only the 'mjd' values,
-            # and get the first one.)
-            mjd = (
-                MasterRfiCatalog.objects.order_by("-mjd")
-                .values_list("mjd", flat=True)
-                .first()
-            )
+            print("calc max")
+            mjd = rows.aggregate(Max("mjd"))["mjd__max"]
             print("Using latest MJD value {} ({})".format(mjd, mjd_to_datetime(mjd)))
+            rows = rows.filter(mjd=mjd)
+            start_mjd = mjd
+            end_mjd = mjd
 
-        dt = mjd_to_datetime(mjd)
-
+        # Filter by MJD
         print("Querying...")
-        data = pd.DataFrame(MasterRfiCatalog.objects.filter(mjd=mjd).values())
-
-        # Write CSV
-        csv_filename = options["output"] / "rfi_data_{}.csv".format(
-            dt.strftime("%Y-%m-%d_%H-%M-%S")
+        data = pd.DataFrame(rows.values())
+        data.insert(
+            loc=list(data.columns).index("mjd"),
+            column="dt",
+            value=[mjd_to_datetime(_mjd) for _mjd in data["mjd"]],
         )
+        if data.empty:
+            print("No results found :(")
+            return
+
+        print("Creating summary table...")
+        summary = data[
+            [
+                "dt",
+                "mjd",
+                "frontend",
+                "frequency_mhz",
+                "intensity_jy",
+            ]
+        ].groupby(["dt", "mjd", "frontend"])
+        summary = summary.min()
+        print("Found {} unique RFI sessions:".format(len(summary)))
+        print(summary.to_string())
+        print("-" * 20)
+        start_dt = mjd_to_datetime(start_mjd)
+        end_dt = mjd_to_datetime(end_mjd)
+        date_range_str = "{}-{}".format(
+            start_dt.strftime("%Y-%m-%d_%H-%M-%S"), end_dt.strftime("%Y-%m-%d_%H-%M-%S")
+        )
+        # Write CSV
+        csv_filename = options["output"] / "rfi_data_{}.csv".format(date_range_str)
         print("Wrote {}".format(csv_filename))
         # Write CSV file; don't include index column
         data.to_csv(csv_filename, index=False)
 
         # Convert from list of (freq, intensity) to two "lists": freqs and intensities
         plot_filename = options["output"] / "rfi_data_{}_plot.png".format(
-            dt.strftime("%Y-%m-%d_%H-%M-%S")
+            date_range_str
         )
         plt.suptitle("RFI Data Plot")
-        plt.title(dt)
+        plt.title(date_range_str)
         plt.xlabel("Frequency (MHZ)")
         plt.ylabel("Intensity (Jy)")
         plt.plot(data["frequency_mhz"], data["intensity_jy"])
