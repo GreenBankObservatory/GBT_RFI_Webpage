@@ -158,18 +158,20 @@ class Command(BaseCommand):
         start_dt = mjd_to_datetime(start_mjd)
         end_dt = mjd_to_datetime(end_mjd)
         date_range_str = "{}-{}".format(
-            start_dt.strftime("%Y-%m-%d_%H-%M-%S"), end_dt.strftime("%Y-%m-%d_%H-%M-%S")
+            start_dt.strftime("%Y_%m_%d_%H_%M_%S"), end_dt.strftime("%Y_%m_%d_%H_%M_%S")
         )
         # Write CSV
-        csv_filename = options["output"] / "rfi_data_{}.csv".format(date_range_str)
-        print("Wrote {}".format(csv_filename))
+        receivers_stub = "-" + "-".join(options["receivers"]) if options["receivers"] else ""
+        filename_stub = "{date_range_str}{receivers}".format(
+            date_range_str=date_range_str, receivers=receivers_stub
+        )
+        csv_path = options["output"] / "rfi_data-{}.csv".format(filename_stub)
+        print("Saved CSV to {}".format(csv_path))
         # Write CSV file; don't include index column
-        data.to_csv(csv_filename, index=False)
+        data.to_csv(csv_path, index=False)
 
         # Convert from list of (freq, intensity) to two "lists": freqs and intensities
-        plot_filename = options["output"] / "rfi_data_{}_plot.png".format(
-            date_range_str
-        )
+        plot_filename = options["output"] / "rfi_data_plot-{}.png".format(filename_stub)
         plt.suptitle("RFI Data Plot")
         plt.title(date_range_str)
         plt.xlabel("Frequency (MHZ)")
